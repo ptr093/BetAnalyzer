@@ -703,7 +703,7 @@ public sealed class FlashscoreStatsProvider : IStatsProvider
                     WaitUntilState.DOMContentLoaded
             });
 
-        await page.WaitForTimeoutAsync(1200);
+        await page.WaitForTimeoutAsync(1000);
 
         var statisticsAvailable =
             await WaitForStatisticsAsync(
@@ -856,19 +856,21 @@ public sealed class FlashscoreStatsProvider : IStatsProvider
         IPage page,
         CancellationToken cancellationToken)
     {
-        var body =
-            await page.Locator("body")
-                .InnerTextAsync();
-
-        if (body.Contains(
-                "Statystyki bêd¹ dostêpne po rozpoczêciu meczu",
-                StringComparison.OrdinalIgnoreCase))
+        if (await IsPreMatchStatisticsMessageVisibleAsync(page))
         {
             await LogAsync(
-                "Flashscore: statystyki niedostêpne " +
-                "przed rozpoczêciem meczu.");
+                "Flashscore: wykryto komunikat o statystykach " +
+                "dostêpnych po rozpoczêciu meczu.");
 
-            return false;
+            var openedPreviousMatch =
+                await ClickPreviousMatchDetailsAsync(
+                    page,
+                    cancellationToken);
+
+            if (openedPreviousMatch)
+            {
+                await page.WaitForTimeoutAsync(700);
+            }
         }
 
         var selectors =
@@ -899,19 +901,141 @@ public sealed class FlashscoreStatsProvider : IStatsProvider
             }
             catch (PlaywrightException)
             {
-                // SprawdŸ nastêpny selector.
+                // SprawdŸ kolejny selector.
             }
         }
 
         await LogAsync(
-            "Flashscore: nie znaleziono tabeli statystyk; " +
-            "zapisujê mecz z pustymi statystykami.");
+            "Flashscore: po próbie otwarcia poprzedniego meczu " +
+            "nie znaleziono widocznej tabeli statystyk.");
 
         await SaveDiagnosticsSafeAsync(
             page,
             "flashscore-statistics-not-found");
 
         return false;
+    }
+
+    private static async Task<bool>
+        IsPreMatchStatisticsMessageVisibleAsync(
+        IPage page)
+    {
+        try
+        {
+            var body =
+                await page.Locator("body")
+                    .InnerTextAsync();
+
+            return body.Contains(
+                "Statystyki bêd¹ dostêpne po rozpoczêciu meczu",
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch (PlaywrightException)
+        {
+            return false;
+        }
+    }
+
+    private static async Task<bool>
+        ClickPreviousMatchDetailsAsync(
+        IPage page,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var button =
+            page.GetByRole(
+                AriaRole.Button,
+                new PageGetByRoleOptions
+                {
+                    Name = "Poka¿ szczegó³y meczu",
+                    Exact = false
+                })
+            .First;
+
+        if (await button.CountAsync() == 0 ||
+            !await button.IsVisibleAsync())
+        {
+            button =
+                page.GetByText(
+                    "POKA¯ SZCZEGÓ£Y MECZU",
+                    new PageGetByTextOptions
+                    {
+                        Exact = false
+                    })
+                .First;
+        }
+
+        if (await button.CountAsync() == 0 ||
+            !await button.IsVisibleAsync())
+        {
+            // Dodatkowy selektor oparty na tekœcie przycisku.
+            button =
+                page.Locator(
+                    "button, a, [role='button']")
+                .Filter(
+                    new LocatorFilterOptions
+                    {
+                        HasText = "POKA¯ SZCZEGÓ£Y MECZU"
+                    })
+                .First;
+        }
+
+        if (await button.CountAsync() == 0 ||
+            !await button.IsVisibleAsync())
+        {
+            await LogAsync(
+                "Flashscore: komunikat przedmeczowy jest widoczny, " +
+                "ale nie znaleziono przycisku " +
+                "'Poka¿ szczegó³y meczu'.");
+
+            return false;
+        }
+
+        var visible =
+            await TryScrollIntoViewAsync(
+                button,
+                "previous-match-details-button");
+
+        if (!visible)
+        {
+            await LogAsync(
+                "Flashscore: przycisk poprzedniego meczu " +
+                "jest niewidoczny albo nie da siê go przewin¹æ.");
+
+            return false;
+        }
+
+        try
+        {
+            await button.ClickAsync(
+                new LocatorClickOptions
+                {
+                    Force = true,
+                    Timeout = 3000
+                });
+
+            await page.WaitForTimeoutAsync(700);
+
+            await LogAsync(
+                "Flashscore: klikniêto " +
+                "'Poka¿ szczegó³y meczu'.");
+
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (PlaywrightException ex)
+        {
+            await LogAsync(
+                $"Flashscore: b³¹d klikniêcia " +
+                $"'Poka¿ szczegó³y meczu'; " +
+                $"error='{Shorten(ex.Message, 500)}'");
+
+            return false;
+        }
     }
 
     private static async Task<(int HomeGoals, int AwayGoals)>
@@ -1462,7 +1586,6 @@ public sealed class FlashscoreStatsProvider : IStatsProvider
                 Path =
                     $"scraper-diagnostics/" +
                     $"{safe}.png",
-
                 FullPage = true
             });
 
